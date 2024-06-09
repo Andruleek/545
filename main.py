@@ -1,76 +1,23 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import Column, Integer, String, create_engine
+from sqlalchemy import Column, Integer, String, create_engine, func
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-
-# Конфігурація бази даних
-SQLALCHEMY_DATABASE_URL = "sqlite:///contacts.db"
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# Декларативна база даних
-Base = declarative_base()
-
-# Модель контакту
-class Contact(Base):
-    __tablename__ = "contacts"
-    id = Column(Integer, primary_key=True)
-    first_name = Column(String)
-    last_name = Column(String)
-    email = Column(String)
-    phone = Column(String)
-    birthday = Column(String)
-    additional_data = Column(String)
-
-# Клас для роботи з сесією
-class ContactDB:
-    def __init__(self, session):
-        self.session = session
-
-    def create_contact(self, contact: Contact):
-        self.session.add(contact)
-        self.session.commit()
-
-    def get_contacts(self):
-        return self.session.query(Contact).all()
-
-    def get_contact(self, contact_id: int):
-        return self.session.query(Contact).filter(Contact.id == contact_id).first()
-
-    def update_contact(self, contact_id: int, contact: Contact):
-        contact_to_update = self.get_contact(contact_id)
-        if contact_to_update is None:
-            raise HTTPException(status_code=404, detail="Contact not found")
-        contact_to_update.first_name = contact.first_name
-        contact_to_update.last_name = contact.last_name
-        contact_to_update.email = contact.email
-        contact_to_update.phone = contact.phone
-        contact_to_update.birthday = contact.birthday
-        contact_to_update.additional_data = contact.additional_data
-        self.session.commit()
-
-    def delete_contact(self, contact_id: int):
-        contact_to_delete = self.get_contact(contact_id)
-        if contact_to_delete is None:
-            raise HTTPException(status_code=404, detail="Contact not found")
-        self.session.delete(contact_to_delete)
-        self.session.commit()
-
-# Функція для створення сесії
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+from datetime import date, timedelta
 
 app = FastAPI()
 
-# Роут для створення контакту
-@app.post("/contacts")
-async def create_contact(contact: Contact):
+class ContactCreate(BaseModel):
+    first_name: str = Field(min_length=1, max_length=50)
+    last_name: str = Field(min_length=1, max_length=50)
+    email: str = Field(min_length=1, max_length=120)
+    phone: str = Field(min_length=1, max_length=20)
+    birthday: str
+    additional_data: str = Field(max_length=500)
+
+@app.post("/contacts", status_code=201)
+async def create_contact(contact: ContactCreate):
     db = next(get_db())
     contact_to_create = Contact(
         first_name=contact.first_name,
@@ -83,14 +30,20 @@ async def create_contact(contact: Contact):
     db.create_contact(contact_to_create)
     return JSONResponse(content={"message": "Contact created"}, media_type="application/json")
 
-# Роут для відображення списку контактів
 @app.get("/contacts")
-async def get_contacts():
+async def get_contacts(page: int = 1, page_size: int = 10, sort_by: str = "first_name", sort_order: str = "asc"):
     db = next(get_db())
     contacts = db.get_contacts()
-    return JSONResponse(content={"contacts": [contact.__dict__ for contact in contacts]}, media_type="application/json")
+    if sort_by == "first_name":
+        contacts.sort(key=lambda x: x.first_name, reverse=sort_order == "desc")
+    elif sort_by == "last_name":
+        contacts.sort(key=lambda x: x.last_name, reverse=sort_order == "desc")
+    elif sort_by == "email":
+        contacts.sort(key=lambda x: x.email, reverse=sort_order == "desc")
+    start = (page - 1) * page_size
+    end = start + page_size
+    return JSONResponse(content={"contacts": [contact.__dict__ for contact in contacts[start:end]]}, media_type="application/json")
 
-# Роут для відображення контакту за ідентифікатором
 @app.get("/contacts/{contact_id}")
 async def get_contact(contact_id: int):
     db = next(get_db())
@@ -99,52 +52,47 @@ async def get_contact(contact_id: int):
         raise HTTPException(status_code=404, detail="Contact not found")
     return JSONResponse(content={"contact": contact.__dict__}, media_type="application/json")
 
-# Роут для оновлення контакту
 @app.put("/contacts/{contact_id}")
-async def update_contact(contact_id: int, contact: Contact):
+async def update_contact(contact_id: int, contact: ContactCreate):
     db = next(get_db())
-    db.update_contact(contact_id, contact)
+    contact_to_update = db.get_contact(contact_id)
+    if contact_to_update is None:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    contact_to_update.first_name = contact.first_name
+    contact_to_update.last_name = contact.last_name
+    contact_to_update.email = contact.email
+    contact_to_update.phone = contact.phone
+    contact_to_update.birthday = contact.birthday
+    contact_to_update.additional_data = contact.additional_data
+    db.update_contact(contact_id, contact_to_update)
     return JSONResponse(content={"message": "Contact updated"}, media_type="application/json")
 
-# Роут для відображення всіх контактів
-@app.get("/contacts/all")
-async def get_all_contacts():
-    db = next(get_db())
-    contacts = db.get_contacts()
-    return JSONResponse(content={"contacts": [contact.__dict__ for contact in contacts]}, media_type="application/json")
-
-# Роут для видалення контакту
 @app.delete("/contacts/{contact_id}")
 async def delete_contact(contact_id: int):
     db = next(get_db())
+    contact_to_delete = db.get_contact(contact_id)
+    if contact_to_delete is None:
+        raise HTTPException(status_code=404, detail="Contact not found")
     db.delete_contact(contact_id)
     return JSONResponse(content={"message": "Contact deleted"}, media_type="application/json")
 
-@app.route('/contacts/search', methods=['GET'])
-def search_contacts():
-    name = request.args.get('name')
-    surname = request.args.get('surname')
-    email = request.args.get('email')
-
-    contacts = Contact.query.filter(
-        (Contact.name.like('%' + name + '%')) |
-        (Contact.surname.like('%' + surname + '%')) |
+@app.get("/contacts/search")
+async def search_contacts(name: str = "", surname: str = "", email: str = ""):
+    db = next(get_db())
+    contacts = db.session.query(Contact).filter(
+        (Contact.first_name.like('%' + name + '%')) |
+        (Contact.last_name.like('%' + surname + '%')) |
         (Contact.email.like('%' + email + '%'))
     ).all()
+    return JSONResponse(content={"contacts": [contact.__dict__ for contact in contacts]}, media_type="application/json")
 
-    return jsonify([contact.json() for contact in contacts])
-
-from datetime import date, timedelta
-
-@app.route('/contacts/upcoming_birthdays', methods=['GET'])
-def upcoming_birthdays():
+@app.get("/contacts/upcoming_birthdays")
+async def upcoming_birthdays():
     today = date.today()
     next_week = today + timedelta(days=7)
-
-    contacts = Contact.query.filter(
-        Contact.birthday >= today,
-        Contact.birthday <= next_week
+    db = next(get_db())
+    contacts = db.session.query(Contact).filter(
+        func.strftime('%m-%d', Contact.birthday) >= func.strftime('%m-%d', today),
+        func.strftime('%m-%d', Contact.birthday) <= func.strftime('%m-%d', next_week)
     ).all()
-
-    return jsonify([contact.json() for contact in contacts])
-
+    return JSONResponse(content={"contacts": [contact.__dict__ for contact in contacts]}, media_type="application/json")
